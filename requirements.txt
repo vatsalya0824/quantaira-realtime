@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pydantic
+psycopg[binary]
+SQLAlchemy>=2.0
+python-dateutil
+pandas
+plotly
+streamlit
+requests
