@@ -32,13 +32,25 @@ class TenoviMeasurement(BaseModel):
 
 @app.post("/webhook/tenovi")
 async def webhook_tenovi(request: Request):
-    # Simple header auth
-    secret = request.headers.get("X-Webhook-Key")
-    print("Webhook header received:", secret)
+    # --- tolerant header auth ---
+    hdrs = request.headers
+    secret = (
+        hdrs.get("X-Webhook-Key")
+        or hdrs.get("x-webhook-key")
+        or hdrs.get("Authorization")    # if Tenovi uses default header name
+        or hdrs.get("authorization")
+    )
+
+    # If Tenovi stuffs "X-Webhook-Key: value" into Authorization's VALUE
+    if secret and ":" in secret and not secret.strip().lower().startswith(("bearer ", "basic ")):
+        secret = secret.split(":", 1)[1].strip()
+
     if secret != WEBHOOK_SECRET:
+        print("Webhook header received:", secret)
         print("Expected:", WEBHOOK_SECRET)
         raise HTTPException(status_code=401, detail="Invalid secret")
 
+    # --- the rest of your existing code stays the same ---
     payload = await request.json()
     if not isinstance(payload, list):
         raise HTTPException(status_code=400, detail="Payload must be an array")
@@ -51,15 +63,9 @@ async def webhook_tenovi(request: Request):
             try:
                 m = TenoviMeasurement(**item)
             except Exception:
-                # store raw even if shape is weird
                 m = TenoviMeasurement(metric=str(item.get("metric", "unknown")))
 
-            # pick timestamp: created > timestamp > now
-            ts = (
-                item.get("created")
-                or item.get("timestamp")
-                or now.isoformat()
-            )
+            ts = item.get("created") or item.get("timestamp") or now.isoformat()
             try:
                 created_utc = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
             except Exception:
