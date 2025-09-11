@@ -97,3 +97,7 @@ def api_measurements(hours: int = 72):
             {"cutoff": cutoff}
         ).mappings().all()
     return [dict(r) for r in rows]
+    
+@app.get("/")
+def root():
+    return {"status": "ok", "message": "Quantaira backend is running"}
