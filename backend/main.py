@@ -34,7 +34,9 @@ class TenoviMeasurement(BaseModel):
 async def webhook_tenovi(request: Request):
     # Simple header auth
     secret = request.headers.get("X-Webhook-Key")
+    print("Webhook header received:", secret)
     if secret != WEBHOOK_SECRET:
+        print("Expected:", WEBHOOK_SECRET)
         raise HTTPException(status_code=401, detail="Invalid secret")
 
     payload = await request.json()
