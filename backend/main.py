@@ -38,11 +38,10 @@ async def webhook_tenovi(request: Request):
     secret = (
         hdrs.get("X-Webhook-Key")
         or hdrs.get("x-webhook-key")
-        or hdrs.get("Authorization")    # if Tenovi uses default header name
+        or hdrs.get("Authorization")
         or hdrs.get("authorization")
     )
 
-    # If Tenovi stuffs "X-Webhook-Key: value" into Authorization's VALUE
     if secret and ":" in secret and not secret.strip().lower().startswith(("bearer ", "basic ")):
         secret = secret.split(":", 1)[1].strip()
 
@@ -71,7 +70,7 @@ async def webhook_tenovi(request: Request):
             except Exception:
                 created_utc = now
 
-            # ----- SAFE JSON INSERT -----
+            # ✅ Proper JSON serialization
             raw_json = json.dumps(item, default=str)
 
             conn.execute(
@@ -79,17 +78,17 @@ async def webhook_tenovi(request: Request):
                     INSERT INTO measurements
                       (created_utc, metric, value_1, value_2, device_id, device_name, raw)
                     VALUES
-                      (:created_utc, :metric, :value_1, :value_2, :device_id, :device_name, :raw::jsonb)
+                      (:created_utc, :metric, :value_1, :value_2, :device_id, :device_name, CAST(:raw AS JSONB))
                 """),
-                dict(
-                    created_utc=created_utc,
-                    metric=(m.metric or "unknown"),
-                    value_1=m.value_1,
-                    value_2=m.value_2,
-                    device_id=item.get("hwi_device_id") or m.device_id,
-                    device_name=item.get("device_name") or m.device_name,
-                    raw=raw_json,
-                )
+                {
+                    "created_utc": created_utc,
+                    "metric": (m.metric or "unknown"),
+                    "value_1": m.value_1,
+                    "value_2": m.value_2,
+                    "device_id": item.get("hwi_device_id") or m.device_id,
+                    "device_name": item.get("device_name") or m.device_name,
+                    "raw": raw_json,
+                }
             )
             inserted += 1
 
