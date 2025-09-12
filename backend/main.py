@@ -1,4 +1,5 @@
 import os
+import json
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
@@ -50,7 +51,6 @@ async def webhook_tenovi(request: Request):
         print("Expected:", WEBHOOK_SECRET)
         raise HTTPException(status_code=401, detail="Invalid secret")
 
-    # --- the rest of your existing code stays the same ---
     payload = await request.json()
     if not isinstance(payload, list):
         raise HTTPException(status_code=400, detail="Payload must be an array")
@@ -71,10 +71,15 @@ async def webhook_tenovi(request: Request):
             except Exception:
                 created_utc = now
 
+            # ----- SAFE JSON INSERT -----
+            raw_json = json.dumps(item, default=str)
+
             conn.execute(
                 text("""
-                    INSERT INTO measurements (created_utc, metric, value_1, value_2, device_id, device_name, raw)
-                    VALUES (:created_utc, :metric, :value_1, :value_2, :device_id, :device_name, CAST(:raw AS JSONB))
+                    INSERT INTO measurements
+                      (created_utc, metric, value_1, value_2, device_id, device_name, raw)
+                    VALUES
+                      (:created_utc, :metric, :value_1, :value_2, :device_id, :device_name, :raw::jsonb)
                 """),
                 dict(
                     created_utc=created_utc,
@@ -83,7 +88,7 @@ async def webhook_tenovi(request: Request):
                     value_2=m.value_2,
                     device_id=item.get("hwi_device_id") or m.device_id,
                     device_name=item.get("device_name") or m.device_name,
-                    raw=str(item).replace("'", '"'),
+                    raw=raw_json,
                 )
             )
             inserted += 1
@@ -105,7 +110,7 @@ def api_measurements(hours: int = 72):
             {"cutoff": cutoff}
         ).mappings().all()
     return [dict(r) for r in rows]
-    
+
 @app.get("/")
 def root():
     return {"status": "ok", "message": "Quantaira backend is running"}
