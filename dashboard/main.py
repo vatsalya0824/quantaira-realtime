@@ -1,5 +1,5 @@
 # dashboard/main.py
-# Quantaira Dashboard — iOS-style pills, colored segments, stats card on the right,
+# Quantaira Dashboard — iOS-style teal pills, colored segments, stats card on the right,
 # notes + meals + recent-meals section, 24h/3d/7d/30d windows.
 
 from datetime import datetime
@@ -42,19 +42,15 @@ from common import best_ts_col, convert_tz, split_blood_pressure  # type: ignore
 # Page config
 # ─────────────────────────────────────────────
 st.set_page_config(page_title="Quantaira Dashboard", layout="wide")
-BUILD_TAG = "quantaira-dashboard v3 (iOS layout)"
+BUILD_TAG = "quantaira-dashboard v4 teal-ios"
 st.markdown(
     f"<div style='opacity:.45;font:12px/1.2 ui-sans-serif,system-ui'>build {BUILD_TAG}</div>",
     unsafe_allow_html=True,
 )
 
 # ─────────────────────────────────────────────
-# Secrets / constants
+# Palette / constants
 # ─────────────────────────────────────────────
-USDA_API_KEY = os.getenv("USDA_API_KEY") or st.secrets.get("USDA_API_KEY", "")
-if not USDA_API_KEY:
-    st.warning("USDA_API_KEY not set (env var or .streamlit/secrets.toml)")
-
 P = {
     "bg": "#F6FBFD",
     "ink": "#0F172A",
@@ -64,7 +60,6 @@ P = {
     "tealA": "#48C9C3",
     "tealB": "#3FB7B2",
     "glow": "rgba(68,194,189,.32)",
-    # GREEN=above, YELLOW=normal, RED=below
     "segGreen": "#10B981",
     "segYellow": "#FACC15",
     "segRed": "#EF4444",
@@ -75,13 +70,14 @@ P = {
 }
 UNITS = {"pulse": "bpm", "systolic_bp": "mmHg", "diastolic_bp": "mmHg", "spo2": "%"}
 
-# sensible global defaults for LSL/USL
 DEFAULT_LIMITS = {
     "pulse": (60, 100),
     "systolic_bp": (90, 130),
     "diastolic_bp": (60, 85),
     "spo2": (94, 100),
 }
+
+USDA_API_KEY = os.getenv("USDA_API_KEY") or st.secrets.get("USDA_API_KEY", "")
 
 # ─────────────────────────────────────────────
 # Simple per-patient persistence (CSV for meals/notes)
@@ -154,7 +150,7 @@ def save_notes(pid: str, df: pd.DataFrame):
 
 
 # ─────────────────────────────────────────────
-# Session state
+# Session / URL params
 # ─────────────────────────────────────────────
 def _get_param(key: str, default: str):
     try:
@@ -166,7 +162,6 @@ def _get_param(key: str, default: str):
     return st.session_state.get(key, default)
 
 
-# you can pass ?pid=54321&name=Todd in URL if needed
 pid = str(_get_param("pid", "quantaira"))
 name = str(_get_param("name", "Quantaira Dashboard"))
 
@@ -182,31 +177,34 @@ if "limits" not in st.session_state:
 if "global_limits" not in st.session_state:
     st.session_state.global_limits = DEFAULT_LIMITS.copy()
 else:
-    # ensure defaults exist
     for k, v in DEFAULT_LIMITS.items():
         st.session_state.global_limits.setdefault(k, v)
 
 if "limit_mode" not in st.session_state:
     st.session_state.limit_mode = "Global defaults"
 
-# Initialize meals/notes on first load for this patient
-if "persist_loaded_for" not in st.session_state or st.session_state.persist_loaded_for != pid:
+if (
+    "persist_loaded_for" not in st.session_state
+    or st.session_state.persist_loaded_for != pid
+):
     st.session_state["meals"] = load_meals(pid)
     st.session_state["notes"] = load_notes(pid)
     st.session_state["usda_hits"] = []
     st.session_state.persist_loaded_for = pid
 
 # ─────────────────────────────────────────────
-# CSS — match your Patient page look
+# Inline CSS — teal iOS look, pills, chart card, stats card
 # ─────────────────────────────────────────────
 st.markdown(
     f"""
 <style>
   .stApp {{ background:{P['bg']}; color:{P['ink']}; }}
   section[data-testid="stSidebar"] {{
-      background:#ECF7F6;
-      border-right:1px solid rgba(2,6,23,.06);
+      background:#ECF7F6 !important;
+      border-right:1px solid rgba(2,6,23,.06) !important;
   }}
+  section[data-testid="stSidebar"] * {{ color:{P['ink']} !important; }}
+
   .h-title {{
       font-weight:900;
       font-size:34px;
@@ -223,36 +221,34 @@ st.markdown(
       gap:12px;
       flex-wrap:wrap;
       align-items:center;
-      margin:6px 0 14px;
+      margin:8px 0 14px;
   }}
   .pillrow .stButton {{ margin:0 !important; }}
 
-  .stButton > button {{
+  /* Neutral pills for time window + metric */
+  .stButton > button[id^="tw_"],
+  .stButton > button[id^="metric_"] {{
       appearance:none !important;
       border:1px solid {P['chipBrd']} !important;
       background:{P['chip']} !important;
       color:{P['ink']} !important;
       border-radius:999px !important;
       padding:12px 20px !important;
-      font-weight:900 !important;
+      font-weight:800 !important;
       font-size:15px !important;
       line-height:1 !important;
       box-shadow:0 10px 24px rgba(17,24,39,.08) !important;
       transition: transform .18s cubic-bezier(.22,.61,.36,1),
-                  box-shadow .22s ease, filter .18s linear,
-                  background-color .18s linear, color .18s linear, border-color .18s linear;
+                  box-shadow .22s ease, filter .18s linear;
   }}
-  .stButton > button:hover {{
+  .stButton > button[id^="tw_"]:hover,
+  .stButton > button[id^="metric_"]:hover {{
       transform: translateY(-2px);
-      filter: brightness(.99);
+      filter: brightness(.98);
       box-shadow:0 14px 30px rgba(17,24,39,.10) !important;
   }}
-  .stButton > button:active {{
-      transform: translateY(0);
-      box-shadow:0 8px 16px rgba(17,24,39,.10) !important;
-  }}
 
-  /* active pills */
+  /* ACTIVE pill = teal subtle (based on current win & metric from session) */
   .stButton > button#tw_{st.session_state.win}-button,
   .stButton > button#metric_{st.session_state.metric_sel}-button {{
       background:linear-gradient(180deg,{P['tealA']},{P['tealB']}) !important;
@@ -265,9 +261,10 @@ st.markdown(
   .chart-wrap {{
       background:#fff;
       border-radius:18px;
-      padding:12px 14px;
+      padding:16px 20px;
       box-shadow:0 18px 44px rgba(17,24,39,.10);
   }}
+
   .stats {{
       background:#fff;
       border-radius:14px;
@@ -283,6 +280,8 @@ st.markdown(
       font-size:14px;
       color:{P['ink']};
   }}
+
+  .block-container {{ padding-top:1.2rem !important; }}
 </style>
 """,
     unsafe_allow_html=True,
@@ -314,6 +313,9 @@ limit_mode = st.sidebar.radio(
 )
 st.session_state.limit_mode = limit_mode
 
+if not USDA_API_KEY:
+    st.sidebar.warning("USDA_API_KEY missing (meals search will fail).")
+
 # ─────────────────────────────────────────────
 # Header
 # ─────────────────────────────────────────────
@@ -325,7 +327,7 @@ st.markdown(
 )
 
 # ─────────────────────────────────────────────
-# Time window + metric pills (top row)
+# Time window + metric pills
 # ─────────────────────────────────────────────
 st.markdown('<div class="pillrow">', unsafe_allow_html=True)
 tw_cols = st.columns(4, gap="small")
@@ -350,7 +352,7 @@ for i, m in enumerate(METRIC_LABELS.keys()):
 st.markdown("</div>", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-# Data loading
+# Data loading + prep
 # ─────────────────────────────────────────────
 def load_window(hours: int) -> pd.DataFrame:
     try:
@@ -381,23 +383,21 @@ try:
 except Exception:
     pass
 
-# ─────────────────────────────────────────────
-# Prepare + pill events
-# ─────────────────────────────────────────────
+
 def prepare(df: pd.DataFrame, tz_name: str):
     df = df.copy()
     df["value"] = pd.to_numeric(df.get("value", df.get("value_1")), errors="coerce")
     df["metric"] = df["metric"].astype(str).str.strip().str.lower()
 
-    # pillbox detection
     is_pill = df["metric"].eq("pillbox_opened")
     if "device_name" in df.columns:
         is_pill |= df["device_name"].astype(str).str.lower().str.contains(
             "pillbox", na=False
         )
 
-    pill_events = df.loc[is_pill, "timestamp_utc"].dropna().sort_values().unique().tolist()
-
+    pill_events = (
+        df.loc[is_pill, "timestamp_utc"].dropna().sort_values().unique().tolist()
+    )
     plot_df = df.loc[~is_pill].copy()
     plot_df["local_time"] = convert_tz(plot_df["timestamp_utc"], tz_name)
     return plot_df, pill_events
@@ -431,12 +431,11 @@ def get_limits_for_mode(mode: str, pid: str, metric: str, values: pd.Series):
             return float(g[0]), float(g[1])
         return suggest_limits(values)
 
-    # Auto
     return suggest_limits(values)
 
 
 # ─────────────────────────────────────────────
-# UTC matching for markers (pills, meals, notes)
+# UTC matching for events
 # ─────────────────────────────────────────────
 def nearest_indices_utc(x_ts, event_ts_list):
     if not x_ts or not event_ts_list:
@@ -455,7 +454,7 @@ def nearest_indices_utc(x_ts, event_ts_list):
 
 
 # ─────────────────────────────────────────────
-# Chart.js helpers
+# Chart.js single metric with markers + colored segments
 # ─────────────────────────────────────────────
 def chartjs_single_with_markers(
     x, y, pill_idx, meal_idx, note_idx, lsl, usl, key="cj_single", height=460
@@ -573,18 +572,13 @@ def chartjs_single_with_markers(
     st_html(html, height=height, scrolling=False)
 
 
-# (dual BP chart omitted for brevity; if you want BP both as two lines,
-# you can copy the chartjs_dual_bp_with_markers version from your Patient.py
-# and drop it here exactly as before.)
-
 # ─────────────────────────────────────────────
-# Render main chart + stats
+# Main chart + stats
 # ─────────────────────────────────────────────
 metric = st.session_state.metric_sel
 
 if metric == "bp_both":
-    # OPTIONAL: you can plug in your dual BP chart here like in Patient.py.
-    st.info("BP (both) view: copy your dual-BP Chart.js function here if desired.")
+    st.info("BP (both) view not implemented yet — add dual-BP chart if needed.")
 else:
     sub = plot_df[plot_df["metric"] == metric].copy().sort_values("local_time")
     if sub.empty:
@@ -620,6 +614,8 @@ else:
                 usl,
                 key=f"cj_{metric}_{st.session_state.win}",
             )
+            st.caption("Colored line = segment relative to LSL/USL. Dots: pill / meal / note.")
+
         with stats_col:
             s = pd.to_numeric(sub["value"], errors="coerce").dropna()
             latest = (
@@ -644,7 +640,7 @@ else:
             )
 
 # ─────────────────────────────────────────────
-# Add Note & Add Meal (USDA) — side-by-side cards
+# Add Note & Add Meal (USDA) — full section
 # ─────────────────────────────────────────────
 note_col, meal_col = st.columns([1, 1], gap="large")
 
@@ -711,7 +707,7 @@ with meal_col:
         do_search = st.form_submit_button("🔎 Search")
     if do_search:
         hits = []
-        if q.strip():
+        if q.strip() and USDA_API_KEY:
             try:
                 r = requests.get(
                     "https://api.nal.usda.gov/fdc/v1/foods/search",
@@ -808,7 +804,7 @@ with meal_col:
                     st.rerun()
 
 # ─────────────────────────────────────────────
-# Recent Meals (same layout as your screenshots)
+# Recent Meals
 # ─────────────────────────────────────────────
 st.markdown("### 🍽️ Recent Meals")
 if st.session_state["meals"].empty:
