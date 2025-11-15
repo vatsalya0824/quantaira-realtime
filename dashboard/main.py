@@ -9,7 +9,7 @@ import plotly.express as px
 import requests
 import streamlit as st
 
-# ───────────────────────── CONFIG ─────────────────────────
+# ────────────────────── PAGE CONFIG & THEME ──────────────────────
 
 st.set_page_config(page_title="Quantaira Dashboard", layout="wide")
 
@@ -21,27 +21,37 @@ if os.path.exists(CSS_FILE):
 API_BASE = os.getenv("API_BASE", "https://quantaira-render2.onrender.com/api")
 USDA_API_KEY = os.getenv("USDA_API_KEY", "")
 
+# Colours similar to your old Patient page
 COLORS = {
-    "pulse": "#6F52ED",        # purple
-    "systolic_bp": "#2D9CDB",  # blue
-    "diastolic_bp": "#9B51E0", # violet
-    "spo2": "#FF6B8A",         # pink
+    "pulse": "#6F52ED",
+    "systolic_bp": "#2D9CDB",
+    "diastolic_bp": "#9B51E0",
+    "spo2": "#FF6B8A",
+}
+UNITS = {
+    "pulse": "bpm",
+    "systolic_bp": "mmHg",
+    "diastolic_bp": "mmHg",
+    "spo2": "%",
 }
 
-# default LSL/USL per metric
-LIMITS = {
-    "pulse": (60, 100),
-    "systolic_bp": (90, 130),
-    "diastolic_bp": (60, 85),
-    "spo2": (92, 100),
+# ── GLOBAL DEFAULT LIMITS (LSL / USL) ──
+GLOBAL_LIMITS = {
+    "pulse": (60.0, 100.0),
+    "systolic_bp": (90.0, 130.0),
+    "diastolic_bp": (60.0, 85.0),
+    "spo2": (92.0, 100.0),
 }
 
-# ───────────────────────── DATA HELPERS ─────────────────────────
+# ────────────────────── DATA HELPERS ──────────────────────
+
 
 def fetch_measurements(hours: int = 24) -> pd.DataFrame:
-    """Fetch vitals from backend /measurements."""
+    """Fetch vitals from backend /measurements endpoint."""
     try:
-        r = requests.get(f"{API_BASE}/measurements", params={"hours": hours}, timeout=20)
+        r = requests.get(
+            f"{API_BASE}/measurements", params={"hours": hours}, timeout=20
+        )
         r.raise_for_status()
         rows = r.json()
     except Exception as e:
@@ -52,23 +62,29 @@ def fetch_measurements(hours: int = 24) -> pd.DataFrame:
         return pd.DataFrame(columns=["created_utc", "metric", "value"])
 
     df = pd.DataFrame(rows)
+
     if "created_utc" not in df.columns:
         return pd.DataFrame(columns=["created_utc", "metric", "value"])
 
-    df["timestamp_utc"] = pd.to_datetime(df["created_utc"], utc=True)
+    df["timestamp_utc"] = pd.to_datetime(df["created_utc"], utc=True, errors="coerce")
 
+    # Normalise metric names
     mlow = df["metric"].astype(str).str.lower()
     df.loc[mlow.isin({"pulse", "heart_rate", "hr"}), "metric"] = "pulse"
     df.loc[mlow.isin({"spo2", "sp02", "oxygen"}), "metric"] = "spo2"
 
-    # split blood pressure into systolic / diastolic
+    # Split blood pressure rows into systolic / diastolic if we have value_1/value_2
     bp_mask = mlow.isin({"blood_pressure", "bp"})
     if "value_2" in df.columns and bp_mask.any():
         bp = df[bp_mask].copy()
-        sys = bp.assign(metric="systolic_bp",
-                        value=pd.to_numeric(bp["value_1"], errors="coerce"))
-        dia = bp.assign(metric="diastolic_bp",
-                        value=pd.to_numeric(bp["value_2"], errors="coerce"))
+        sys = bp.assign(
+            metric="systolic_bp",
+            value=pd.to_numeric(bp["value_1"], errors="coerce"),
+        )
+        dia = bp.assign(
+            metric="diastolic_bp",
+            value=pd.to_numeric(bp["value_2"], errors="coerce"),
+        )
         df = pd.concat([df[~bp_mask], sys, dia], ignore_index=True)
     else:
         df["value"] = pd.to_numeric(df.get("value_1"), errors="coerce")
@@ -77,20 +93,21 @@ def fetch_measurements(hours: int = 24) -> pd.DataFrame:
     return df
 
 
+# GREEN = above USL, YELLOW = normal, RED = below LSL (like old Chart.js page)
 def color_for_value(v: float, lsl: float, usl: float) -> str:
-    if v < lsl:
-        return "#F04438"  # red
-    if v > usl:
-        return "#F4B000"  # yellow
-    return "#12B981"     # green
+    if usl is not None and v > usl:
+        return "#10B981"  # green
+    if lsl is not None and v < lsl:
+        return "#EF4444"  # red
+    return "#FACC15"  # yellow (normal range)
 
 
 def build_colored_segments(
     sub: pd.DataFrame, lsl: float, usl: float
 ) -> Tuple[List[Tuple[List[pd.Timestamp], List[float], str]], List[str]]:
     """
-    Build line segments where each segment has a single colour.
-    Also returns per-point colours for markers.
+    Build line segments where each contiguous segment has a single colour.
+    Also returns per-point colours.
     """
     xs = sub["ts_local"].tolist()
     ys = sub["value"].tolist()
@@ -110,10 +127,8 @@ def build_colored_segments(
             seg_x.append(xs[i])
             seg_y.append(ys[i])
         else:
-            # close old segment
             if len(seg_x) > 1:
                 segments.append((seg_x, seg_y, cur_color))
-            # start new, duplicate previous point so line doesn't gap
             seg_x = [xs[i - 1], xs[i]]
             seg_y = [ys[i - 1], ys[i]]
             cur_color = c
@@ -122,6 +137,27 @@ def build_colored_segments(
         segments.append((seg_x, seg_y, cur_color))
 
     return segments, pt_colors
+
+
+def suggest_limits(values: pd.Series):
+    """Compute Auto limits μ ± 0.5σ."""
+    s = pd.to_numeric(values, errors="coerce").dropna()
+    if s.empty:
+        return None, None
+    mu = float(s.mean())
+    sd = float(s.std(ddof=0) or 0.0)
+    return mu - 0.5 * sd, mu + 0.5 * sd
+
+
+def get_limits(metric: str, values: pd.Series, mode: str):
+    """Mode = 'Global defaults' or 'Auto (μ±0.5σ)'."""
+    if mode == "Global defaults":
+        if metric in GLOBAL_LIMITS:
+            return GLOBAL_LIMITS[metric]
+        # Fallback if no defaults known
+        return suggest_limits(values)
+    # Auto mode
+    return suggest_limits(values)
 
 
 def compute_stats(sub: pd.DataFrame) -> Dict[str, float]:
@@ -134,7 +170,9 @@ def compute_stats(sub: pd.DataFrame) -> Dict[str, float]:
         "max": float(s.max()),
     }
 
-# ───────────────────────── USDA + MEALS ─────────────────────────
+
+# ────────────────────── USDA + MEALS ──────────────────────
+
 
 def usda_search(query: str, page_size: int = 10) -> List[dict]:
     if not USDA_API_KEY or not query.strip():
@@ -182,9 +220,16 @@ def ensure_state():
     if "usda_results" not in st.session_state:
         st.session_state["usda_results"] = []
 
-# ───────────────────────── UI HELPERS ─────────────────────────
 
-def stats_card_html(stats: Dict[str, float], lsl: float, usl: float, newest: str) -> str:
+# ────────────────────── UI HELPERS ──────────────────────
+
+
+def stats_card_html(
+    stats: Dict[str, float], lsl: float, usl: float, newest: str, metric: str
+) -> str:
+    unit = UNITS.get(metric, "")
+    lsl_txt = "—" if lsl is None else f"{lsl:.1f} {unit}"
+    usl_txt = "—" if usl is None else f"{usl:.1f} {unit}"
     return f"""
     <div style="
         background:#ffffff;
@@ -198,12 +243,12 @@ def stats_card_html(stats: Dict[str, float], lsl: float, usl: float, newest: str
         Newest data point: {newest}
       </div>
       <div style="line-height:1.7;">
-        <b>LSL/USL:</b> {lsl:.1f} / {usl:.1f}<br/>
-        <b>Latest:</b> {stats["latest"]:.1f}<br/>
-        μ <b>Mean:</b> {stats["mean"]:.1f}<br/>
+        <b>LSL/USL:</b> {lsl_txt} / {usl_txt}<br/>
+        <b>Latest:</b> {stats["latest"]:.1f} {unit}<br/>
+        μ <b>Mean:</b> {stats["mean"]:.1f} {unit}<br/>
         σ <b>Std:</b> {stats["std"]:.1f}<br/>
-        <b>Min:</b> {stats["min"]:.1f}<br/>
-        <b>Max:</b> {stats["max"]:.1f}
+        <b>Min:</b> {stats["min"]:.1f} {unit}<br/>
+        <b>Max:</b> {stats["max"]:.1f} {unit}
       </div>
     </div>
     """
@@ -216,13 +261,16 @@ def plot_metric_with_stats(
     line_width: float,
     dot_size: float,
     show_limits: bool,
+    limit_mode: str,
 ):
     sub = df[df["metric"] == metric].copy().sort_values("timestamp_utc")
     if sub.empty:
         st.warning(f"No data for {metric}")
         return
 
-    lsl, usl = LIMITS.get(metric, (0.0, 1e6))
+    # decide limits (defaults vs auto)
+    lsl, usl = get_limits(metric, sub["value"], limit_mode)
+
     sub["ts_local"] = sub["timestamp_utc"].dt.tz_convert(tz)
 
     segments, pt_colors = build_colored_segments(sub, lsl, usl)
@@ -261,7 +309,8 @@ def plot_metric_with_stats(
             )
         )
 
-        if show_limits:
+        # dashed LSL/USL lines
+        if show_limits and lsl is not None:
             fig.add_hline(
                 y=lsl,
                 line_dash="dash",
@@ -269,6 +318,7 @@ def plot_metric_with_stats(
                 annotation_text="LSL",
                 annotation_position="top left",
             )
+        if show_limits and usl is not None:
             fig.add_hline(
                 y=usl,
                 line_dash="dash",
@@ -300,7 +350,9 @@ def plot_metric_with_stats(
     with col_stats:
         stats = compute_stats(sub)
         newest = sub["ts_local"].iloc[-1].strftime("%b %d, %H:%M %Z")
-        st.markdown(stats_card_html(stats, lsl, usl, newest), unsafe_allow_html=True)
+        st.markdown(
+            stats_card_html(stats, lsl, usl, newest, metric), unsafe_allow_html=True
+        )
 
 
 def plot_combined(df: pd.DataFrame, tz: str, normalize: bool):
@@ -314,7 +366,8 @@ def plot_combined(df: pd.DataFrame, tz: str, normalize: bool):
 
     if normalize:
         combo["value"] = combo.groupby("metric")["value"].transform(
-            lambda s: (s - s.mean()) / (s.std(ddof=0) if s.std(ddof=0) else 1.0)
+            lambda s: (s - s.mean())
+            / (s.std(ddof=0) if s.std(ddof=0) else 1.0)
         )
 
     figc = px.line(
@@ -354,11 +407,13 @@ def render_note_and_meals(tz: str):
 
     col_note, col_meal = st.columns(2)
 
-    # ----- Add Note -----
+    # ---- Add Note ----
     with col_note:
         st.subheader("📝 Add Note")
         with st.form("note_form", clear_on_submit=True):
-            note_text = st.text_area("Note", placeholder="e.g., felt dizzy after a walk")
+            note_text = st.text_area(
+                "Note", placeholder="e.g., felt dizzy after a walk"
+            )
             use_now = st.checkbox("Use current time", value=True)
             now = datetime.now(timezone.utc).astimezone()
             if use_now:
@@ -375,12 +430,14 @@ def render_note_and_meals(tz: str):
             if submitted and note_text.strip():
                 st.success("Note captured (demo only, not persisted yet).")
 
-    # ----- Add Meal -----
+    # ---- Add Meal (USDA) ----
     with col_meal:
         st.subheader("🍽️ Add Meal (USDA)")
         with st.form("meal_form"):
             query = st.text_input("Search food (USDA)", value="oatmeal")
-            use_now_meal = st.checkbox("Use current time", value=True, key="meal_use_now")
+            use_now_meal = st.checkbox(
+                "Use current time", value=True, key="meal_use_now"
+            )
             now = datetime.now(timezone.utc).astimezone()
             if use_now_meal:
                 meal_dt = now
@@ -389,8 +446,12 @@ def render_note_and_meals(tz: str):
                     unsafe_allow_html=True,
                 )
             else:
-                d = st.date_input("When was it eaten? (date)", now.date(), key="meal_date")
-                t = st.time_input("Time", now.time(), key="meal_time")
+                d = st.date_input(
+                    "When was it eaten? (date)", now.date(), key="meal_date"
+                )
+                t = st.time_input(
+                    "Time", now.time(), key="meal_time"
+                )
                 meal_dt = datetime.combine(d, t).astimezone()
 
             search_clicked = st.form_submit_button("🔍 Search")
@@ -429,7 +490,7 @@ def render_note_and_meals(tz: str):
                     )
                     st.success("Meal added to Recent Meals.")
 
-    # ----- Recent Meals -----
+    # ---- Recent Meals ----
     st.markdown("### Recent Meals")
     meals = list(reversed(st.session_state["recent_meals"]))
     if not meals:
@@ -465,12 +526,14 @@ def render_note_and_meals(tz: str):
             unsafe_allow_html=True,
         )
 
-# ───────────────────────── MAIN ─────────────────────────
+
+# ────────────────────── MAIN ──────────────────────
+
 
 def main():
     ensure_state()
 
-    # sidebar
+    # Sidebar controls
     with st.sidebar:
         st.markdown("<h3>Settings</h3>", unsafe_allow_html=True)
         tz = st.selectbox(
@@ -478,19 +541,38 @@ def main():
             ["UTC", "US/Eastern", "US/Central", "US/Pacific"],
             index=0,
         )
+        # NOTE: no "Time window (hours)" here anymore
         line_width = st.slider("Line width", 1, 6, 4)
         dot_size = st.slider("Marker size (dots)", 6, 20, 10)
         show_limits = st.checkbox("Show LSL/USL dashed lines", value=True)
-        normalize_combined = st.checkbox("Normalize combined overlay", value=True)
 
-    # top bar
+        st.markdown("---")
+        st.subheader("Limits mode")
+        limit_mode = st.radio(
+            "How to pick LSL/USL?",
+            ["Global defaults", "Auto (μ±0.5σ)"],
+            index=0,
+        )
+
+        st.markdown("---")
+        normalize_combined = st.checkbox(
+            "Normalize combined overlay", value=True
+        )
+
+    # Top bar
     st.markdown(
-        "<div class='top-bar'><span class='title'>Quantaira Dashboard</span></div>",
+        "<div style='font-size:26px;font-weight:700;margin-bottom:4px;'>Quantaira Dashboard</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<div style='font-size:12px;color:#6b7280;margin-bottom:10px;'>"
+        "Green = Above USL · Yellow = Normal · Red = Below LSL"
+        "</div>",
         unsafe_allow_html=True,
     )
 
-    # time window pills in main area
-    col_tw, _ = st.columns([1.3, 2.7])
+    # Time-window pills in main content
+    col_tw, _ = st.columns([1.4, 3.0])
     with col_tw:
         window_choice = st.radio(
             "Time window",
@@ -501,22 +583,49 @@ def main():
     hours_map = {"24h": 24, "3 days": 72, "7 days": 168}
     hours = hours_map[window_choice]
 
+    # Fetch data
     df = fetch_measurements(hours)
     if df.empty:
         st.warning("No data yet from devices for this time window.")
     else:
         tabs = st.tabs(
-            ["❤️ Heart Rate", "💧 Systolic BP", "💜 Diastolic BP", "🫁 SpO₂", "📊 BP (both)"]
+            [
+                "❤️ Heart Rate",
+                "💧 Systolic BP",
+                "💜 Diastolic BP",
+                "🫁 SpO₂",
+                "📊 BP (both)",
+            ]
         )
 
         with tabs[0]:
-            plot_metric_with_stats(df, "pulse", tz, line_width, dot_size, show_limits)
+            plot_metric_with_stats(
+                df, "pulse", tz, line_width, dot_size, show_limits, limit_mode
+            )
         with tabs[1]:
-            plot_metric_with_stats(df, "systolic_bp", tz, line_width, dot_size, show_limits)
+            plot_metric_with_stats(
+                df,
+                "systolic_bp",
+                tz,
+                line_width,
+                dot_size,
+                show_limits,
+                limit_mode,
+            )
         with tabs[2]:
-            plot_metric_with_stats(df, "diastolic_bp", tz, line_width, dot_size, show_limits)
+            plot_metric_with_stats(
+                df,
+                "diastolic_bp",
+                tz,
+                line_width,
+                dot_size,
+                show_limits,
+                limit_mode,
+            )
         with tabs[3]:
-            plot_metric_with_stats(df, "spo2", tz, line_width, dot_size, show_limits)
+            plot_metric_with_stats(
+                df, "spo2", tz, line_width, dot_size, show_limits, limit_mode
+            )
         with tabs[4]:
             plot_combined(df, tz, normalize_combined)
 
