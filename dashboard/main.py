@@ -20,7 +20,9 @@ try:
     from fetcher import fetch_data
 except ImportError:
     # fallback: simple HTTP fetcher
-    API_BASE = os.getenv("API_BASE") or st.secrets.get("API_BASE", "https://quantaira-render2.onrender.com/api")
+    API_BASE = os.getenv("API_BASE") or st.secrets.get(
+        "API_BASE", "https://quantaira-render2.onrender.com/api"
+    )
     API_BASE = API_BASE.rstrip("/")
 
     def fetch_data(hours: int, patient_id: str | None = None):
@@ -40,7 +42,7 @@ from common import best_ts_col, convert_tz, split_blood_pressure  # type: ignore
 # Page config
 # ─────────────────────────────────────────────
 st.set_page_config(page_title="Quantaira Dashboard", layout="wide")
-BUILD_TAG = "quantaira-dashboard v2 (iOS layout)"
+BUILD_TAG = "quantaira-dashboard v3 (iOS layout)"
 st.markdown(
     f"<div style='opacity:.45;font:12px/1.2 ui-sans-serif,system-ui'>build {BUILD_TAG}</div>",
     unsafe_allow_html=True,
@@ -54,13 +56,22 @@ if not USDA_API_KEY:
     st.warning("USDA_API_KEY not set (env var or .streamlit/secrets.toml)")
 
 P = {
-    "bg": "#F6FBFD", "ink": "#0F172A", "muted": "#667085",
-    "chip": "#F3F6F8", "chipBrd": "rgba(2,6,23,.08)",
-    "tealA": "#48C9C3", "tealB": "#3FB7B2", "glow": "rgba(68,194,189,.32)",
+    "bg": "#F6FBFD",
+    "ink": "#0F172A",
+    "muted": "#667085",
+    "chip": "#F3F6F8",
+    "chipBrd": "rgba(2,6,23,.08)",
+    "tealA": "#48C9C3",
+    "tealB": "#3FB7B2",
+    "glow": "rgba(68,194,189,.32)",
     # GREEN=above, YELLOW=normal, RED=below
-    "segGreen": "#10B981", "segYellow": "#FACC15", "segRed": "#EF4444",
+    "segGreen": "#10B981",
+    "segYellow": "#FACC15",
+    "segRed": "#EF4444",
     "refLine": "rgba(15,23,42,.45)",
-    "pillDot": "#0F172A", "mealDot": "#f472b6", "noteDot": "#14b8a6",
+    "pillDot": "#0F172A",
+    "mealDot": "#f472b6",
+    "noteDot": "#14b8a6",
 }
 UNITS = {"pulse": "bpm", "systolic_bp": "mmHg", "diastolic_bp": "mmHg", "spo2": "%"}
 
@@ -78,14 +89,27 @@ DEFAULT_LIMITS = {
 DATA_DIR = Path(".user_state")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+
 def _meals_path(pid: str) -> Path:
     return DATA_DIR / f"meals_{pid}.csv"
+
 
 def _notes_path(pid: str) -> Path:
     return DATA_DIR / f"notes_{pid}.csv"
 
-MEAL_COLS = ["timestamp_utc", "food", "kcal", "protein_g", "carbs_g", "fat_g", "sodium_mg", "fdc_id"]
+
+MEAL_COLS = [
+    "timestamp_utc",
+    "food",
+    "kcal",
+    "protein_g",
+    "carbs_g",
+    "fat_g",
+    "sodium_mg",
+    "fdc_id",
+]
 NOTE_COLS = ["timestamp_utc", "note"]
+
 
 def load_meals(pid: str) -> pd.DataFrame:
     p = _meals_path(pid)
@@ -93,8 +117,11 @@ def load_meals(pid: str) -> pd.DataFrame:
         return pd.DataFrame(columns=MEAL_COLS)
     df = pd.read_csv(p, dtype={"fdc_id": "string"})
     if "timestamp_utc" in df.columns:
-        df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
+        df["timestamp_utc"] = pd.to_datetime(
+            df["timestamp_utc"], utc=True, errors="coerce"
+        )
     return df[MEAL_COLS].dropna(subset=["timestamp_utc"])
+
 
 def load_notes(pid: str) -> pd.DataFrame:
     p = _notes_path(pid)
@@ -102,20 +129,29 @@ def load_notes(pid: str) -> pd.DataFrame:
         return pd.DataFrame(columns=NOTE_COLS)
     df = pd.read_csv(p)
     if "timestamp_utc" in df.columns:
-        df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, errors="coerce")
+        df["timestamp_utc"] = pd.to_datetime(
+            df["timestamp_utc"], utc=True, errors="coerce"
+        )
     return df[NOTE_COLS].dropna(subset=["timestamp_utc"])
+
 
 def save_meals(pid: str, df: pd.DataFrame):
     out = df.copy()
-    out["timestamp_utc"] = pd.to_datetime(out["timestamp_utc"], utc=True, errors="coerce")
+    out["timestamp_utc"] = pd.to_datetime(
+        out["timestamp_utc"], utc=True, errors="coerce"
+    )
     out = out[MEAL_COLS].sort_values("timestamp_utc").reset_index(drop=True)
     out.to_csv(_meals_path(pid), index=False)
 
+
 def save_notes(pid: str, df: pd.DataFrame):
     out = df.copy()
-    out["timestamp_utc"] = pd.to_datetime(out["timestamp_utc"], utc=True, errors="coerce")
+    out["timestamp_utc"] = pd.to_datetime(
+        out["timestamp_utc"], utc=True, errors="coerce"
+    )
     out = out[NOTE_COLS].sort_values("timestamp_utc").reset_index(drop=True)
     out.to_csv(_notes_path(pid), index=False)
+
 
 # ─────────────────────────────────────────────
 # Session state
@@ -128,6 +164,7 @@ def _get_param(key: str, default: str):
     except Exception:
         pass
     return st.session_state.get(key, default)
+
 
 # you can pass ?pid=54321&name=Todd in URL if needed
 pid = str(_get_param("pid", "quantaira"))
@@ -327,6 +364,7 @@ def load_window(hours: int) -> pd.DataFrame:
     df["timestamp_utc"] = pd.to_datetime(df[ts_col], utc=True, errors="coerce")
     return df.dropna(subset=["timestamp_utc"])
 
+
 raw = load_window(HOURS_LOOKUP[st.session_state.win])
 raw = split_blood_pressure(raw)
 
@@ -364,6 +402,7 @@ def prepare(df: pd.DataFrame, tz_name: str):
     plot_df["local_time"] = convert_tz(plot_df["timestamp_utc"], tz_name)
     return plot_df, pill_events
 
+
 plot_df, pill_events = prepare(raw, tz_choice)
 
 # ─────────────────────────────────────────────
@@ -376,6 +415,7 @@ def suggest_limits(values: pd.Series):
     mu = float(s.mean())
     sd = float(s.std(ddof=0) or 0.0)
     return mu - 0.5 * sd, mu + 0.5 * sd
+
 
 def get_limits_for_mode(mode: str, pid: str, metric: str, values: pd.Series):
     if mode == "Patient override":
@@ -394,6 +434,7 @@ def get_limits_for_mode(mode: str, pid: str, metric: str, values: pd.Series):
     # Auto
     return suggest_limits(values)
 
+
 # ─────────────────────────────────────────────
 # UTC matching for markers (pills, meals, notes)
 # ─────────────────────────────────────────────
@@ -411,6 +452,7 @@ def nearest_indices_utc(x_ts, event_ts_list):
         e_i64 = pd.Timestamp(e).tz_convert("UTC").value
         out.append(int(np.argmin(np.abs(x_utc - e_i64))))
     return sorted(set(out))
+
 
 # ─────────────────────────────────────────────
 # Chart.js helpers
@@ -440,9 +482,7 @@ def chartjs_single_with_markers(
             ref_datasets.append(
                 {
                     "label": "LSL",
-                    "data": [
-                        None if v is None else float(lsl) for v in data
-                    ],
+                    "data": [None if v is None else float(lsl) for v in data],
                     "borderColor": P["refLine"],
                     "borderWidth": 1.2,
                     "borderDash": [6, 4],
@@ -453,9 +493,7 @@ def chartjs_single_with_markers(
             ref_datasets.append(
                 {
                     "label": "USL",
-                    "data": [
-                        None if v is None else float(usl) for v in data
-                    ],
+                    "data": [None if v is None else float(usl) for v in data],
                     "borderColor": P["refLine"],
                     "borderWidth": 1.2,
                     "borderDash": [6, 4],
@@ -534,6 +572,7 @@ def chartjs_single_with_markers(
     )
     st_html(html, height=height, scrolling=False)
 
+
 # (dual BP chart omitted for brevity; if you want BP both as two lines,
 # you can copy the chartjs_dual_bp_with_markers version from your Patient.py
 # and drop it here exactly as before.)
@@ -605,10 +644,9 @@ else:
             )
 
 # ─────────────────────────────────────────────
-# Add Note & Add Meal (USDA) — same layout as your Patient page
+# Add Note & Add Meal (USDA) — side-by-side cards
 # ─────────────────────────────────────────────
-st.markdown("### Add Note & Add Meal")
-note_col, meal_col = st.columns([1, 2], gap="large")
+note_col, meal_col = st.columns([1, 1], gap="large")
 
 with note_col:
     st.subheader("📝 Add Note")
