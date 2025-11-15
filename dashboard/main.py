@@ -1,746 +1,506 @@
 import os
-from datetime import datetime, time as dtime, timezone
-from typing import Dict, List, Tuple, Any
+from datetime import datetime, timezone
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-import streamlit as st
+import plotly.express as px
 import requests
-import pytz
+import streamlit as st
 
-# ───────────────────────── Config
-st.set_page_config(page_title="Quantaira Patient Detail", layout="wide")
+# ──────────────────────────── CONFIG ────────────────────────────
 
-# CSS
+st.set_page_config(page_title="Quantaira Dashboard", layout="wide")
+
 CSS_FILE = os.path.join("assets", "custom.css")
 if os.path.exists(CSS_FILE):
     with open(CSS_FILE, "r", encoding="utf-8") as f:
         st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
-CUSTOM_CSS = """
-<style>
-body, .stApp {
-  background: #f1f5f9;
-}
-
-/* Sidebar */
-section[data-testid="stSidebar"] {
-  background: #e5f3ef;
-}
-.sidebar-title {
-  font-size: 18px;
-  font-weight: 700;
-  margin-bottom: 8px;
-}
-.breadcrumb {
-  font-size: 13px;
-  color: #6b7280;
-  margin-bottom: 4px;
-}
-
-/* Time pills container */
-.time-pill-container button {
-  border-radius: 999px;
-  background: #f9fafb;
-  border: 1px solid #e5e7eb;
-  color: #111827;
-  font-weight: 600;
-}
-.time-pill-active button {
-  background: linear-gradient(135deg,#6366f1,#22c55e);
-  color: #ffffff;
-  border-color: transparent;
-  box-shadow: 0px 10px 25px rgba(99,102,241,0.25);
-}
-
-/* Stats card */
-.stats-card {
-  background: #ffffff;
-  border-radius: 18px;
-  padding: 18px 20px;
-  box-shadow: 0 12px 30px rgba(15,23,42,0.08);
-  font-size: 14px;
-}
-.stats-card h4 {
-  margin-top: 0;
-  margin-bottom: 10px;
-  font-size: 16px;
-}
-.stats-card p {
-  margin: 2px 0;
-}
-
-/* Section cards */
-.section-card {
-  background: #ffffff;
-  border-radius: 18px;
-  padding: 18px 20px;
-  box-shadow: 0 12px 30px rgba(15,23,42,0.06);
-}
-
-/* Recent meal card */
-.meal-card {
-  background: #f8fafc;
-  border-radius: 16px;
-  padding: 14px 18px;
-  border: 1px solid #e5e7eb;
-}
-.meal-macros {
-  display: flex;
-  gap: 32px;
-  margin-top: 8px;
-}
-.meal-macro-item span.label {
-  display: block;
-  font-size: 12px;
-  color: #6b7280;
-}
-.meal-macro-item span.value {
-  font-size: 18px;
-  font-weight: 600;
-}
-</style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-
 API_BASE = os.getenv("API_BASE", "https://quantaira-render2.onrender.com/api")
 USDA_API_KEY = os.getenv("USDA_API_KEY", "")
 
-TIME_WINDOWS = {
-    "24h": 24,
-    "3d": 72,
-    "7d": 168,
+COLORS = {
+    "pulse": "#6F52ED",        # purple
+    "systolic_bp": "#2D9CDB",  # blue
+    "diastolic_bp": "#9B51E0", # violet
+    "spo2": "#FF6B8A",         # pink
 }
 
-TZ_OPTIONS = [
-    "UTC",
-    "US/Eastern",
-    "US/Central",
-    "US/Mountain",
-    "US/Pacific",
-]
-
-METRIC_LABELS = {
-    "pulse": "Heart Rate",
-    "systolic_bp": "Systolic BP",
-    "diastolic_bp": "Diastolic BP",
-    "spo2": "SpO₂",
-}
-
-METRIC_UNITS = {
-    "pulse": "bpm",
-    "systolic_bp": "mmHg",
-    "diastolic_bp": "mmHg",
-    "spo2": "%",
-}
-
-# LSL / USL per metric (example ranges)
+# LSL / USL defaults (you can tweak these)
 LIMITS = {
-    "pulse": (60.0, 100.0),
-    "systolic_bp": (90.0, 120.0),
-    "diastolic_bp": (60.0, 80.0),
-    "spo2": (92.0, 100.0),
+    "pulse": (60, 100),
+    "systolic_bp": (90, 130),
+    "diastolic_bp": (60, 85),
+    "spo2": (92, 100),
 }
 
-# Colors for segments
-COL_RED = "#DC2626"
-COL_YELLOW = "#FACC15"
-COL_GREEN = "#22C55E"
+# ──────────────────────────── HELPERS: DATA ────────────────────────────
 
-# ───────────────────────── Helpers: measurements
-
-def fetch_measurements(hours: int) -> pd.DataFrame:
+def fetch_measurements(hours: int = 24) -> pd.DataFrame:
+    """Fetch vitals from backend /measurements."""
     try:
         r = requests.get(
             f"{API_BASE}/measurements",
             params={"hours": hours},
-            timeout=15,
+            timeout=20,
         )
         r.raise_for_status()
         rows = r.json()
     except Exception as e:
         st.error(f"Backend fetch failed: {e}")
-        return pd.DataFrame(columns=["created_utc", "metric", "value_1", "value_2"])
+        return pd.DataFrame(columns=["created_utc", "metric", "value"])
+
+    if not rows:
+        return pd.DataFrame(columns=["created_utc", "metric", "value"])
 
     df = pd.DataFrame(rows)
-    if df.empty:
-        return df
+    if "created_utc" not in df.columns:
+        return pd.DataFrame(columns=["created_utc", "metric", "value"])
 
     df["timestamp_utc"] = pd.to_datetime(df["created_utc"], utc=True)
 
+    # normalize metric labels
     mlow = df["metric"].astype(str).str.lower()
-
-    # normalize metric names
     df.loc[mlow.isin({"pulse", "heart_rate", "hr"}), "metric"] = "pulse"
     df.loc[mlow.isin({"spo2", "sp02", "oxygen"}), "metric"] = "spo2"
 
+    # blood pressure splitting
     bp_mask = mlow.isin({"blood_pressure", "bp"})
     if "value_2" in df.columns and bp_mask.any():
         bp = df[bp_mask].copy()
-        sys = bp.assign(metric="systolic_bp", value=pd.to_numeric(bp["value_1"], errors="coerce"))
-        dia = bp.assign(metric="diastolic_bp", value=pd.to_numeric(bp["value_2"], errors="coerce"))
+        sys = bp.assign(metric="systolic_bp",
+                        value=pd.to_numeric(bp["value_1"], errors="coerce"))
+        dia = bp.assign(metric="diastolic_bp",
+                        value=pd.to_numeric(bp["value_2"], errors="coerce"))
         df = pd.concat([df[~bp_mask], sys, dia], ignore_index=True)
     else:
         df["value"] = pd.to_numeric(df.get("value_1"), errors="coerce")
 
-    return df[["timestamp_utc", "metric", "value"]].dropna(subset=["timestamp_utc", "metric", "value"])
+    df = df[["timestamp_utc", "metric", "value"]].dropna(
+        subset=["timestamp_utc", "metric", "value"]
+    )
+    return df
 
 
-def to_local(series: pd.Series, tz_name: str) -> pd.Series:
-    tz = pytz.timezone(tz_name)
-    return series.dt.tz_convert(tz)
+def color_for_value(v: float, lsl: float, usl: float) -> str:
+    """Return red / green / yellow based on limits."""
+    if v < lsl:
+        return "#F04438"  # red
+    if v > usl:
+        return "#F4B000"  # yellow
+    return "#12B981"     # green
 
 
-def compute_stats(sub: pd.DataFrame, metric: str) -> Dict[str, Any]:
-    if sub.empty:
-        return {}
+def compute_stats(sub: pd.DataFrame) -> Dict[str, float]:
+    s = sub["value"]
+    return {
+        "latest": float(s.iloc[-1]),
+        "mean": float(s.mean()),
+        "std": float(s.std(ddof=0)) if len(s) > 1 else 0.0,
+        "min": float(s.min()),
+        "max": float(s.max()),
+    }
 
-    vals = sub["value"].astype(float)
-    latest_row = sub.iloc[-1]
-    lsl, usl = LIMITS.get(metric, (float("nan"), float("nan")))
-    unit = METRIC_UNITS.get(metric, "")
+# ──────────────────────────── HELPERS: USDA & MEALS ────────────────────────────
+
+def usda_search(query: str, page_size: int = 10) -> List[dict]:
+    if not USDA_API_KEY or not query.strip():
+        return []
+    try:
+        r = requests.get(
+            "https://api.nal.usda.gov/fdc/v1/foods/search",
+            params={
+                "api_key": USDA_API_KEY,
+                "query": query,
+                "pageSize": page_size,
+                "dataType": "Survey (FNDDS), SR Legacy",
+            },
+            timeout=20,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return data.get("foods", [])
+    except Exception as e:
+        st.warning(f"USDA search failed: {e}")
+        return []
+
+
+def extract_macros(food: dict) -> dict:
+    """Return dict with kcals, protein, carbs, fat, sodium."""
+    nutrients = {n.get("nutrientName", ""): n for n in food.get("foodNutrients", [])}
+    def val(name, default=0.0):
+        n = nutrients.get(name)
+        if not n:
+            return default
+        return float(n.get("value") or 0.0)
 
     return {
-        "lsl": lsl,
-        "usl": usl,
-        "latest": float(latest_row["value"]),
-        "latest_time": latest_row["timestamp_local"],
-        "mean": float(vals.mean()),
-        "std": float(vals.std(ddof=0)),
-        "min": float(vals.min()),
-        "max": float(vals.max()),
-        "unit": unit,
+        "kcals": val("Energy"),
+        "protein": val("Protein"),
+        "carbs": val("Carbohydrate, by difference"),
+        "fat": val("Total lipid (fat)"),
+        "sodium": val("Sodium, Na"),
     }
 
 
-def build_colored_segments(sub: pd.DataFrame, lsl: float, usl: float) -> Tuple[List[Dict], List[str]]:
-    """
-    Build segments and point colors for red/yellow/green ranges.
-    Always returns (segments, point_colors) even if empty.
-    """
-    segments: List[Dict[str, Any]] = []
-    point_colors: List[str] = []
-
-    if sub.shape[0] == 0:
-        return segments, point_colors
-
-    ys = sub["value"].astype(float).to_numpy()
-    xs = sub["timestamp_local"].to_numpy()
-
-    # determine point colors first
-    for y in ys:
-        if y < lsl or y > usl:
-            point_colors.append(COL_RED)
-        elif lsl <= y <= usl:
-            point_colors.append(COL_GREEN)
-        else:
-            point_colors.append(COL_YELLOW)
-
-    if len(xs) < 2:
-        # Not enough points for segments
-        return segments, point_colors
-
-    # segment color based on midpoint
-    for i in range(len(xs) - 1):
-        x0, x1 = xs[i], xs[i + 1]
-        y0, y1 = ys[i], ys[i + 1]
-        mid = (y0 + y1) / 2.0
-
-        if mid < lsl or mid > usl:
-            col = COL_RED
-        elif lsl <= mid <= usl:
-            col = COL_GREEN
-        else:
-            col = COL_YELLOW
-
-        segments.append(
-            {
-                "x": [x0, x1],
-                "y": [y0, y1],
-                "color": col,
-            }
-        )
-
-    return segments, point_colors
-
-
-def plot_metric_with_limits(
-    df: pd.DataFrame,
-    metric: str,
-    tz_name: str,
-    line_width: int,
-    dot_size: int,
-    show_limits: bool,
-) -> Tuple[go.Figure, Dict[str, Any]]:
-    sub = df[df["metric"] == metric].copy().sort_values("timestamp_utc")
-    if sub.empty:
-        fig = go.Figure()
-        fig.update_layout(
-            height=420,
-            paper_bgcolor="white",
-            plot_bgcolor="white",
-            xaxis_title="Time",
-            yaxis_title=METRIC_UNITS.get(metric, ""),
-        )
-        return fig, {}
-
-    sub["timestamp_local"] = to_local(sub["timestamp_utc"], tz_name)
-
-    lsl, usl = LIMITS.get(metric, (float("nan"), float("nan")))
-    segments, pt_colors = build_colored_segments(sub, lsl, usl)
-
-    fig = go.Figure()
-
-    # segments
-    if segments:
-        for seg in segments:
-            fig.add_trace(
-                go.Scatter(
-                    x=seg["x"],
-                    y=seg["y"],
-                    mode="lines",
-                    line=dict(width=line_width, color=seg["color"]),
-                    hovertemplate="%{y}<br>%{x|%Y-%m-%d %H:%M}<extra></extra>",
-                    showlegend=False,
-                )
-            )
-    else:
-        # fallback single line
-        fig.add_trace(
-            go.Scatter(
-                x=sub["timestamp_local"],
-                y=sub["value"],
-                mode="lines",
-                line=dict(width=line_width, color="#4b5563"),
-                hovertemplate="%{y}<br>%{x|%Y-%m-%d %H:%M}<extra></extra>",
-                showlegend=False,
-            )
-        )
-
-    # Points
-    fig.add_trace(
-        go.Scatter(
-            x=sub["timestamp_local"],
-            y=sub["value"],
-            mode="markers",
-            marker=dict(
-                size=dot_size,
-                color=pt_colors if pt_colors else "#111827",
-                line=dict(width=2, color="#ffffff"),
-            ),
-            hovertemplate="Value: %{y}<br>%{x|%Y-%m-%d %H:%M}<extra></extra>",
-            showlegend=False,
-        )
-    )
-
-    # LSL / USL dashed lines
-    if show_limits and not np.isnan(lsl) and not np.isnan(usl):
-        x0, x1 = sub["timestamp_local"].min(), sub["timestamp_local"].max()
-        fig.add_trace(
-            go.Scatter(
-                x=[x0, x1],
-                y=[lsl, lsl],
-                mode="lines",
-                line=dict(color="#9ca3af", width=1, dash="dash"),
-                hoverinfo="skip",
-                showlegend=False,
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=[x0, x1],
-                y=[usl, usl],
-                mode="lines",
-                line=dict(color="#9ca3af", width=1, dash="dash"),
-                hoverinfo="skip",
-                showlegend=False,
-            )
-        )
-
-    fig.update_layout(
-        height=420,
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        margin=dict(l=20, r=20, t=10, b=40),
-        hovermode="x unified",
-        xaxis=dict(
-            showgrid=True,
-            gridcolor="rgba(148,163,184,0.25)",
-        ),
-        yaxis=dict(
-            title=METRIC_UNITS.get(metric, ""),
-            showgrid=True,
-            gridcolor="rgba(226,232,240,0.6)",
-        ),
-    )
-
-    stats = compute_stats(sub, metric)
-    return fig, stats
-
-
-def newest_timestamp_text(df: pd.DataFrame, tz_name: str) -> str:
-    if df.empty:
-        return "No data in source"
-    latest = df["timestamp_utc"].max()
-    tz = pytz.timezone(tz_name)
-    latest_local = latest.tz_convert(tz)
-    return f"Newest data point in source: {latest_local.strftime('%b %d, %H:%M %Z')}"
-
-# ───────────────────────── Helpers: notes & meals (USDA)
-
-def usda_search(query: str, api_key: str, page_size: int = 10) -> List[Dict[str, Any]]:
-    if not api_key:
-        st.warning("USDA_API_KEY is not set. Add it as an environment variable.")
-        return []
-
-    try:
-        resp = requests.get(
-            "https://api.nal.usda.gov/fdc/v1/foods/search",
-            params={"query": query, "pageSize": page_size, "api_key": api_key},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        st.error(f"USDA search failed: {e}")
-        return []
-
-    results = []
-    for food in data.get("foods", []):
-        desc = food.get("description", "Unknown food")
-        nutrients = {n.get("nutrientName", ""): n.get("value", 0.0) for n in food.get("foodNutrients", [])}
-        results.append(
-            {
-                "fdcId": food.get("fdcId"),
-                "description": desc,
-                "kcal": nutrients.get("Energy", 0.0),
-                "protein": nutrients.get("Protein", 0.0),
-                "carbs": nutrients.get("Carbohydrate, by difference", 0.0),
-                "fat": nutrients.get("Total lipid (fat)", 0.0),
-                "sodium": nutrients.get("Sodium, Na", 0.0),
-            }
-        )
-    return results
-
-
 def ensure_state():
-    if "notes" not in st.session_state:
-        st.session_state["notes"] = []
-    if "meals" not in st.session_state:
-        st.session_state["meals"] = []
+    if "recent_meals" not in st.session_state:
+        st.session_state["recent_meals"] = []
     if "usda_results" not in st.session_state:
         st.session_state["usda_results"] = []
-    if "time_choice" not in st.session_state:
-        st.session_state["time_choice"] = "24h"
 
-# ───────────────────────── Sidebar
+# ──────────────────────────── UI HELPERS ────────────────────────────
 
-ensure_state()
+def stats_card_html(stats: Dict[str, float], lsl: float, usl: float, newest: str) -> str:
+    return f"""
+    <div style="
+        background:#ffffff;
+        border-radius:18px;
+        padding:18px 20px;
+        box-shadow:0 12px 30px rgba(15,23,42,0.10);
+        font-size:14px;
+        ">
+      <h4 style="margin:0 0 8px 0;font-weight:600;">Stats</h4>
+      <div style="font-size:12px;color:#6b7280;margin-bottom:8px;">
+        Newest data point: {newest}
+      </div>
+      <div style="line-height:1.7;">
+        <b>LSL/USL:</b> {lsl:.1f} / {usl:.1f}<br/>
+        <b>Latest:</b> {stats["latest"]:.1f}<br/>
+        μ <b>Mean:</b> {stats["mean"]:.1f}<br/>
+        σ <b>Std:</b> {stats["std"]:.1f}<br/>
+        <b>Min:</b> {stats["min"]:.1f}<br/>
+        <b>Max:</b> {stats["max"]:.1f}
+      </div>
+    </div>
+    """
 
-with st.sidebar:
-    st.markdown('<div class="breadcrumb">Home</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-title">Patient</div>', unsafe_allow_html=True)
+def plot_metric_with_stats(
+    df: pd.DataFrame,
+    metric: str,
+    tz: str,
+    line_width: float,
+    dot_size: float,
+    show_limits: bool,
+):
+    sub = df[df["metric"] == metric].copy().sort_values("timestamp_utc")
+    if sub.empty:
+        st.warning(f"No data for {metric}")
+        return
 
-    st.markdown("### Settings")
+    lsl, usl = LIMITS.get(metric, (0.0, 1e6))
 
-    tz_name = st.selectbox("Timezone", TZ_OPTIONS, index=0)
+    # to timezone
+    sub["ts_local"] = sub["timestamp_utc"].dt.tz_convert(tz)
 
-    line_width = st.slider("Line width", 1, 6, 4)
-    dot_size = st.slider("Marker size (dots)", 6, 20, 10)
+    # colours for markers
+    marker_colors = [
+        color_for_value(v, lsl, usl) for v in sub["value"].tolist()
+    ]
 
-    show_limits = st.checkbox("Show LSL/USL dashed lines", True)
+    col_chart, col_stats = st.columns([3.3, 1.2])
 
-    st.markdown("### Limits mode")
-    st.write("Using fixed LSL/USL per metric for now.")
-
-# ───────────────────────── Main layout
-
-st.markdown("## Patient Detail")
-
-# Time window pills
-time_cols = st.columns(len(TIME_WINDOWS))
-for i, label in enumerate(TIME_WINDOWS.keys()):
-    key = f"time_{label}"
-    active = st.session_state["time_choice"] == label
-    klass = "time-pill-container time-pill-active" if active else "time-pill-container"
-    with time_cols[i]:
-        st.markdown(f'<div class="{klass}">', unsafe_allow_html=True)
-        if st.button(label, key=key):
-            st.session_state["time_choice"] = label
-        st.markdown("</div>", unsafe_allow_html=True)
-
-time_label = st.session_state["time_choice"]
-hours = TIME_WINDOWS[time_label]
-
-df = fetch_measurements(hours)
-if df.empty:
-    st.warning("No data yet for this time window.")
-    st.stop()
-
-st.caption(newest_timestamp_text(df, tz_name))
-
-# Metric tabs including systolic
-tabs = st.tabs(["Heart Rate", "Systolic BP", "Diastolic BP", "SpO₂", "BP (both)"])
-
-# Heart Rate
-with tabs[0]:
-    chart_col, stats_col = st.columns([3.2, 1.1])
-    fig, stats = plot_metric_with_limits(df, "pulse", tz_name, line_width, dot_size, show_limits)
-    with chart_col:
-        st.plotly_chart(fig, use_container_width=True)
-    with stats_col:
-        st.markdown('<div class="stats-card">', unsafe_allow_html=True)
-        st.markdown("<h4>Stats</h4>", unsafe_allow_html=True)
-        if stats:
-            unit = stats["unit"]
-            st.markdown(f"**LSL/USL:** {stats['lsl']:.1f} / {stats['usl']:.1f} {unit}")
-            st.markdown(f"**Latest:** {stats['latest']:.1f} {unit}")
-            st.markdown(
-                f"Mean (µ): **{stats['mean']:.1f}**  \n"
-                f"Std (σ): **{stats['std']:.1f}**"
-            )
-            st.markdown(f"Min: **{stats['min']:.1f} {unit}**")
-            st.markdown(f"Max: **{stats['max']:.1f} {unit}**")
-            st.markdown(
-                f"Time: {stats['latest_time'].strftime('%Y-%m-%d %H:%M %Z')}"
-            )
-        else:
-            st.markdown("No stats available.")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-# Systolic
-with tabs[1]:
-    chart_col, stats_col = st.columns([3.2, 1.1])
-    fig, stats = plot_metric_with_limits(df, "systolic_bp", tz_name, line_width, dot_size, show_limits)
-    with chart_col:
-        st.plotly_chart(fig, use_container_width=True)
-    with stats_col:
-        st.markdown('<div class="stats-card">', unsafe_allow_html=True)
-        st.markdown("<h4>Stats</h4>", unsafe_allow_html=True)
-        if stats:
-            unit = stats["unit"]
-            st.markdown(f"**LSL/USL:** {stats['lsl']:.1f} / {stats['usl']:.1f} {unit}")
-            st.markdown(f"**Latest:** {stats['latest']:.1f} {unit}")
-            st.markdown(
-                f"Mean (µ): **{stats['mean']:.1f}**  \n"
-                f"Std (σ): **{stats['std']:.1f}**"
-            )
-            st.markdown(f"Min: **{stats['min']:.1f} {unit}**")
-            st.markdown(f"Max: **{stats['max']:.1f} {unit}**")
-            st.markdown(
-                f"Time: {stats['latest_time'].strftime('%Y-%m-%d %H:%M %Z')}"
-            )
-        else:
-            st.markdown("No stats available.")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-# Diastolic
-with tabs[2]:
-    chart_col, stats_col = st.columns([3.2, 1.1])
-    fig, stats = plot_metric_with_limits(df, "diastolic_bp", tz_name, line_width, dot_size, show_limits)
-    with chart_col:
-        st.plotly_chart(fig, use_container_width=True)
-    with stats_col:
-        st.markdown('<div class="stats-card">', unsafe_allow_html=True)
-        st.markdown("<h4>Stats</h4>", unsafe_allow_html=True)
-        if stats:
-            unit = stats["unit"]
-            st.markdown(f"**LSL/USL:** {stats['lsl']:.1f} / {stats['usl']:.1f} {unit}")
-            st.markdown(f"**Latest:** {stats['latest']:.1f} {unit}")
-            st.markdown(
-                f"Mean (µ): **{stats['mean']:.1f}**  \n"
-                f"Std (σ): **{stats['std']:.1f}**"
-            )
-            st.markdown(f"Min: **{stats['min']:.1f} {unit}**")
-            st.markdown(f"Max: **{stats['max']:.1f} {unit}**")
-            st.markdown(
-                f"Time: {stats['latest_time'].strftime('%Y-%m-%d %H:%M %Z')}"
-            )
-        else:
-            st.markdown("No stats available.")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-# SpO2
-with tabs[3]:
-    chart_col, stats_col = st.columns([3.2, 1.1])
-    fig, stats = plot_metric_with_limits(df, "spo2", tz_name, line_width, dot_size, show_limits)
-    with chart_col:
-        st.plotly_chart(fig, use_container_width=True)
-    with stats_col:
-        st.markdown('<div class="stats-card">', unsafe_allow_html=True)
-        st.markdown("<h4>Stats</h4>", unsafe_allow_html=True)
-        if stats:
-            unit = stats["unit"]
-            st.markdown(f"**LSL/USL:** {stats['lsl']:.1f} / {stats['usl']:.1f} {unit}")
-            st.markdown(f"**Latest:** {stats['latest']:.1f} {unit}")
-            st.markdown(
-                f"Mean (µ): **{stats['mean']:.1f}**  \n"
-                f"Std (σ): **{stats['std']:.1f}**"
-            )
-            st.markdown(f"Min: **{stats['min']:.1f} {unit}**")
-            st.markdown(f"Max: **{stats['max']:.1f} {unit}**")
-            st.markdown(
-                f"Time: {stats['latest_time'].strftime('%Y-%m-%d %H:%M %Z')}"
-            )
-        else:
-            st.markdown("No stats available.")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-# BP both overlay
-with tabs[4]:
-    chart_col, stats_col = st.columns([3.2, 1.1])
-    with chart_col:
+    with col_chart:
         fig = go.Figure()
-        for m in ["systolic_bp", "diastolic_bp"]:
-            subfig, _ = plot_metric_with_limits(df, m, tz_name, line_width, dot_size, show_limits)
-            for tr in subfig.data:
-                fig.add_trace(tr)
+
+        # light base line
+        fig.add_trace(
+            go.Scatter(
+                x=sub["ts_local"],
+                y=sub["value"],
+                mode="lines",
+                line=dict(width=line_width, color="rgba(148,163,184,0.4)"),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+
+        # coloured dots
+        fig.add_trace(
+            go.Scatter(
+                x=sub["ts_local"],
+                y=sub["value"],
+                mode="markers",
+                marker=dict(
+                    size=dot_size,
+                    color=marker_colors,
+                    line=dict(width=2, color="#111827"),
+                ),
+                hovertemplate="%{y:.1f}<br>%{x|%Y-%m-%d %H:%M %Z}<extra></extra>",
+                showlegend=False,
+            )
+        )
+
+        if show_limits:
+            fig.add_hline(
+                y=lsl,
+                line_dash="dash",
+                line_color="rgba(148,163,184,0.9)",
+                annotation_text="LSL",
+                annotation_position="top left",
+            )
+            fig.add_hline(
+                y=usl,
+                line_dash="dash",
+                line_color="rgba(148,163,184,0.9)",
+                annotation_text="USL",
+                annotation_position="top left",
+            )
+
         fig.update_layout(
-            height=420,
+            margin=dict(l=20, r=20, t=20, b=30),
             paper_bgcolor="white",
             plot_bgcolor="white",
-            margin=dict(l=20, r=20, t=10, b=40),
+            height=420,
             hovermode="x unified",
-            yaxis=dict(title="mmHg"),
         )
+        fig.update_xaxes(
+            rangeslider=dict(visible=True),
+            showgrid=True,
+            gridcolor="rgba(148,163,184,0.2)",
+            griddash="dot",
+        )
+        fig.update_yaxes(
+            showgrid=True,
+            gridcolor="rgba(148,163,184,0.2)",
+            griddash="dot",
+        )
+
         st.plotly_chart(fig, use_container_width=True)
 
-    with stats_col:
-        st.markdown('<div class="stats-card">', unsafe_allow_html=True)
-        st.markdown("<h4>Stats</h4>", unsafe_allow_html=True)
+    with col_stats:
+        stats = compute_stats(sub)
+        newest = sub["ts_local"].iloc[-1].strftime("%b %d, %H:%M %Z")
+        st.markdown(stats_card_html(stats, lsl, usl, newest), unsafe_allow_html=True)
 
-        # systolic stats
-        sub_sys = df[df["metric"] == "systolic_bp"].copy()
-        if not sub_sys.empty:
-            sub_sys["timestamp_local"] = to_local(sub_sys["timestamp_utc"], tz_name)
-        systats = compute_stats(sub_sys, "systolic_bp") if not sub_sys.empty else {}
 
-        # diastolic stats
-        sub_dia = df[df["metric"] == "diastolic_bp"].copy()
-        if not sub_dia.empty:
-            sub_dia["timestamp_local"] = to_local(sub_dia["timestamp_utc"], tz_name)
-        diastats = compute_stats(sub_dia, "diastolic_bp") if not sub_dia.empty else {}
+def plot_combined(df: pd.DataFrame, tz: str, normalize: bool):
+    show_cols = ["pulse", "spo2", "systolic_bp", "diastolic_bp"]
+    combo = df[df["metric"].isin(show_cols)].copy().sort_values("timestamp_utc")
+    if combo.empty:
+        st.warning("No data for combined view.")
+        return
 
-        if systats:
-            st.markdown(f"**Systolic LSL/USL:** {systats['lsl']:.1f} / {systats['usl']:.1f} mmHg")
-            st.markdown(f"Latest: **{systats['latest']:.1f} mmHg**")
-            st.markdown(f"Mean: **{systats['mean']:.1f}**, Std: **{systats['std']:.1f}**")
-            st.markdown(f"Min: **{systats['min']:.1f}**, Max: **{systats['max']:.1f}**")
-            st.markdown("---")
-        if diastats:
-            st.markdown(f"**Diastolic LSL/USL:** {diastats['lsl']:.1f} / {diastats['usl']:.1f} mmHg")
-            st.markdown(f"Latest: **{diastats['latest']:.1f} mmHg**")
-            st.markdown(f"Mean: **{diastats['mean']:.1f}**, Std: **{diastats['std']:.1f}**")
-            st.markdown(f"Min: **{diastats['min']:.1f}**, Max: **{diastats['max']:.1f}**")
-        if not systats and not diastats:
-            st.markdown("No stats available.")
-        st.markdown("</div>", unsafe_allow_html=True)
+    combo["ts_local"] = combo["timestamp_utc"].dt.tz_convert(tz)
 
-# ───────────────────────── Add Note & Add Meal
+    if normalize:
+        combo["value"] = combo.groupby("metric")["value"].transform(
+            lambda s: (s - s.mean()) / (s.std(ddof=0) if s.std(ddof=0) else 1.0)
+        )
 
-st.markdown("### Add Note & Add Meal (USDA)")
+    figc = px.line(
+        combo,
+        x="ts_local",
+        y="value",
+        color="metric",
+        category_orders={"metric": show_cols},
+        color_discrete_map=COLORS,
+    )
+    figc.update_traces(line=dict(width=2))
+    figc.update_layout(
+        margin=dict(l=20, r=20, t=20, b=30),
+        paper_bgcolor="white",
+        plot_bgcolor="white",
+        height=420,
+        hovermode="x unified",
+    )
+    figc.update_xaxes(
+        rangeslider=dict(visible=True),
+        showgrid=True,
+        gridcolor="rgba(148,163,184,0.2)",
+        griddash="dot",
+    )
+    figc.update_yaxes(
+        showgrid=True,
+        gridcolor="rgba(148,163,184,0.2)",
+        griddash="dot",
+    )
+    st.plotly_chart(figc, use_container_width=True)
 
-note_col, meal_col = st.columns(2)
 
-# ----- Notes
-with note_col:
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("📝 Add Note")
-    note_text = st.text_area("Note", "", placeholder="e.g., felt dizzy after a walk", label_visibility="collapsed")
-    use_now_note = st.checkbox("Use current time", value=True, key="note_use_now")
+def render_note_and_meals(tz: str):
+    ensure_state()
 
-    if not use_now_note:
-        note_date = st.date_input("When? (date)", datetime.now().date(), key="note_date")
-        note_time = st.time_input("Time", datetime.now().time().replace(microsecond=0), key="note_time")
-    else:
-        note_date = datetime.now().date()
-        note_time = datetime.now().time().replace(microsecond=0)
+    st.markdown("### Add Note & Add Meal (USDA)")
 
-    if st.button("➕ Add Note"):
-        if note_text.strip():
-            dt = datetime.combine(note_date, note_time).replace(tzinfo=timezone.utc)
-            st.session_state["notes"].append({"text": note_text.strip(), "time": dt})
-            st.success("Note added.")
-        else:
-            st.warning("Please enter a note before adding.")
-    st.markdown("</div>", unsafe_allow_html=True)
+    col_note, col_meal = st.columns(2)
 
-# ----- Meals
-with meal_col:
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("🍽️ Add Meal (USDA)")
-
-    query = st.text_input("Search food (USDA)", "oatmeal", label_visibility="collapsed")
-    use_now_meal = st.checkbox("Use current time", value=True, key="meal_use_now")
-
-    if not use_now_meal:
-        meal_date = st.date_input("When was it eaten? (date)", datetime.now().date(), key="meal_date")
-        meal_time = st.time_input("Time", datetime.now().time().replace(microsecond=0), key="meal_time")
-    else:
-        meal_date = datetime.now().date()
-        meal_time = datetime.now().time().replace(microsecond=0)
-
-    if st.button("🔍 Search"):
-        st.session_state["usda_results"] = usda_search(query, USDA_API_KEY)
-
-    results = st.session_state.get("usda_results", [])
-    if results:
-        st.markdown("**Results**")
-        for idx, food in enumerate(results):
-            desc = food["description"]
-            kcal = food["kcal"]
-            p = food["protein"]
-            c = food["carbs"]
-            f = food["fat"]
-            na = food["sodium"]
-
-            st.markdown(
-                f"**{desc}**  \n"
-                f"{kcal:.0f} kcal • P {p:.1f} g • C {c:.1f} g • F {f:.1f} g • Na {na:.0f} mg"
-            )
-            if st.button("➕ Add", key=f"add_meal_{idx}"):
-                dt = datetime.combine(meal_date, meal_time).replace(tzinfo=timezone.utc)
-                st.session_state["meals"].append(
-                    {
-                        "description": desc,
-                        "time": dt,
-                        "kcal": kcal,
-                        "protein": p,
-                        "carbs": c,
-                        "fat": f,
-                        "sodium": na,
-                    }
+    # ---------- Add Note ----------
+    with col_note:
+        st.subheader("📝 Add Note")
+        with st.form("note_form", clear_on_submit=True):
+            note_text = st.text_area("Note", placeholder="e.g., felt dizzy after a walk")
+            use_now = st.checkbox("Use current time", value=True)
+            now = datetime.now(timezone.utc).astimezone()
+            if use_now:
+                note_dt = now
+                st.markdown(
+                    f"<div style='font-size:12px;color:#6b7280;'>Time: {now.strftime('%Y-%m-%d %H:%M %Z')}</div>",
+                    unsafe_allow_html=True,
                 )
-                st.success("Meal added.")
+            else:
+                d = st.date_input("Date", now.date())
+                t = st.time_input("Time", now.time())
+                note_dt = datetime.combine(d, t).astimezone()
+            submitted = st.form_submit_button("Add Note")
+            if submitted and note_text.strip():
+                # For now just show a toast; you can wire this to backend later.
+                st.success("Note captured (demo only, not persisted yet).")
+
+    # ---------- Add Meal ----------
+    with col_meal:
+        st.subheader("🍽️ Add Meal (USDA)")
+        with st.form("meal_form"):
+            query = st.text_input("Search food (USDA)", value="oatmeal")
+            use_now_meal = st.checkbox("Use current time", value=True, key="meal_use_now")
+            now = datetime.now(timezone.utc).astimezone()
+            if use_now_meal:
+                meal_dt = now
+                st.markdown(
+                    f"<div style='font-size:12px;color:#6b7280;'>Eating time (local): {now.strftime('%Y-%m-%d %H:%M %Z')}</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                d = st.date_input("When was it eaten? (date)", now.date(), key="meal_date")
+                t = st.time_input("Time", now.time(), key="meal_time")
+                meal_dt = datetime.combine(d, t).astimezone()
+
+            search_clicked = st.form_submit_button("🔍 Search")
+            if search_clicked:
+                st.session_state["usda_results"] = usda_search(query)
+
+        # Show search results with "Add" buttons
+        results = st.session_state.get("usda_results", [])
+        for idx, food in enumerate(results):
+            desc = food.get("description", "Unknown item")
+            brand = food.get("brandName")
+            label = f"{desc}" + (f" — {brand}" if brand else "")
+            macros = extract_macros(food)
+            kcals = macros["kcals"]
+            protein = macros["protein"]
+            carbs = macros["carbs"]
+            fat = macros["fat"]
+            sodium = macros["sodium"]
+
+            with st.container():
+                st.markdown(
+                    f"**{label}**  \n"
+                    f"{kcals:.0f} kcal · P {protein:.1f} g · C {carbs:.1f} g · F {fat:.1f} g · Na {sodium:.0f} mg"
+                )
+                if st.button("➕ Add", key=f"add_meal_{idx}"):
+                    st.session_state["recent_meals"].append(
+                        {
+                            "label": label,
+                            "time": meal_dt,
+                            "kcals": kcals,
+                            "protein": protein,
+                            "carbs": carbs,
+                            "fat": fat,
+                            "sodium": sodium,
+                        }
+                    )
+                    st.success("Meal added to Recent Meals.")
+
+    # ---------- Recent Meals ----------
+    st.markdown("### Recent Meals")
+    meals = list(reversed(st.session_state["recent_meals"]))
+    if not meals:
+        st.info("No meals added yet.")
+        return
+
+    for m in meals[:5]:
+        t_str = m["time"].strftime("%Y-%m-%d %H:%M %Z")
+        st.markdown(
+            f"""
+            <div style="
+                background:#ffffff;
+                border-radius:16px;
+                padding:12px 16px;
+                margin-bottom:10px;
+                box-shadow:0 8px 20px rgba(15,23,42,0.06);
+            ">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <div>
+                  <div style="font-weight:600;">{m["label"]}</div>
+                  <div style="font-size:12px;color:#6b7280;">{t_str}</div>
+                </div>
+                <div style="font-size:12px;color:#4b5563;text-align:right;">
+                  <div><b>{m["kcals"]:.0f}</b> kcal</div>
+                  <div>Protein <b>{m["protein"]:.1f} g</b></div>
+                  <div>Carbs <b>{m["carbs"]:.1f} g</b></div>
+                  <div>Fat <b>{m["fat"]:.1f} g</b></div>
+                  <div>Sodium <b>{m["sodium"]:.0f} mg</b></div>
+                </div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+# ──────────────────────────── MAIN PAGE ────────────────────────────
+
+def main():
+    ensure_state()
+
+    # Sidebar
+    with st.sidebar:
+        st.markdown("<h3>Settings</h3>", unsafe_allow_html=True)
+        tz = st.selectbox(
+            "Timezone",
+            ["UTC", "US/Eastern", "US/Central", "US/Pacific"],
+            index=0,
+        )
+
+        # Time window pills (24h, 3d, 7d)
+        window_choice = st.radio(
+            "Time window",
+            options=["24h", "3 days", "7 days"],
+            index=0,
+        )
+        hours_map = {"24h": 24, "3 days": 72, "7 days": 168}
+        hours = hours_map[window_choice]
+
+        line_width = st.slider("Line width", 1, 6, 4)
+        dot_size = st.slider("Marker size (dots)", 6, 20, 10)
+        show_limits = st.checkbox("Show LSL/USL dashed lines", value=True)
+        normalize_combined = st.checkbox("Normalize combined overlay", value=True)
+
+    # Top bar
+    st.markdown(
+        """
+        <div class="top-bar"><span class="title">Quantaira Dashboard</span></div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    df = fetch_measurements(hours)
+    if df.empty:
+        st.warning("No data yet from devices for this time window.")
     else:
-        st.caption("Search above to see USDA results.")
-    st.markdown("</div>", unsafe_allow_html=True)
+        # Metric tabs
+        tabs = st.tabs(["❤️ Heart Rate", "💧 Systolic BP", "💜 Diastolic BP", "🫁 SpO₂", "📊 BP (both)"])
 
-# ───────────────────────── Recent Meals
+        with tabs[0]:
+            plot_metric_with_stats(df, "pulse", tz, line_width, dot_size, show_limits)
 
-st.markdown("### Recent Meals")
+        with tabs[1]:
+            plot_metric_with_stats(df, "systolic_bp", tz, line_width, dot_size, show_limits)
 
-meals = st.session_state.get("meals", [])
-if not meals:
-    st.caption("No meals added yet.")
-else:
-    meals_sorted = sorted(meals, key=lambda m: m["time"], reverse=True)[:3]
-    for meal in meals_sorted:
-        dt_local = meal["time"].astimezone(pytz.timezone(tz_name))
-        st.markdown('<div class="meal-card">', unsafe_allow_html=True)
-        st.markdown(
-            f"**{meal['description']}**  \n"
-            f"{dt_local.strftime('%Y-%m-%d %H:%M %Z')} • {meal['kcal']:.0f} kcal",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<div class="meal-macros">'
-            f'<div class="meal-macro-item"><span class="label">Protein</span><span class="value">{meal["protein"]:.1f} g</span></div>'
-            f'<div class="meal-macro-item"><span class="label">Carbs</span><span class="value">{meal["carbs"]:.1f} g</span></div>'
-            f'<div class="meal-macro-item"><span class="label">Fat</span><span class="value">{meal["fat"]:.1f} g</span></div>'
-            f'<div class="meal-macro-item"><span class="label">Sodium</span><span class="value">{meal["sodium"]:.0f} mg</span></div>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
+        with tabs[2]:
+            plot_metric_with_stats(df, "diastolic_bp", tz, line_width, dot_size, show_limits)
+
+        with tabs[3]:
+            plot_metric_with_stats(df, "spo2", tz, line_width, dot_size, show_limits)
+
+        with tabs[4]:
+            plot_combined(df, tz, normalize_combined)
+
+    st.markdown("---")
+    render_note_and_meals(tz)
+
+
+if __name__ == "__main__":
+    main()
