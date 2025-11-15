@@ -9,7 +9,7 @@ import plotly.express as px
 import requests
 import streamlit as st
 
-# ──────────────────────────── CONFIG ────────────────────────────
+# ───────────────────────── CONFIG ─────────────────────────
 
 st.set_page_config(page_title="Quantaira Dashboard", layout="wide")
 
@@ -28,7 +28,7 @@ COLORS = {
     "spo2": "#FF6B8A",         # pink
 }
 
-# LSL / USL defaults (you can tweak these)
+# default LSL/USL per metric
 LIMITS = {
     "pulse": (60, 100),
     "systolic_bp": (90, 130),
@@ -36,16 +36,12 @@ LIMITS = {
     "spo2": (92, 100),
 }
 
-# ──────────────────────────── HELPERS: DATA ────────────────────────────
+# ───────────────────────── DATA HELPERS ─────────────────────────
 
 def fetch_measurements(hours: int = 24) -> pd.DataFrame:
     """Fetch vitals from backend /measurements."""
     try:
-        r = requests.get(
-            f"{API_BASE}/measurements",
-            params={"hours": hours},
-            timeout=20,
-        )
+        r = requests.get(f"{API_BASE}/measurements", params={"hours": hours}, timeout=20)
         r.raise_for_status()
         rows = r.json()
     except Exception as e:
@@ -61,12 +57,11 @@ def fetch_measurements(hours: int = 24) -> pd.DataFrame:
 
     df["timestamp_utc"] = pd.to_datetime(df["created_utc"], utc=True)
 
-    # normalize metric labels
     mlow = df["metric"].astype(str).str.lower()
     df.loc[mlow.isin({"pulse", "heart_rate", "hr"}), "metric"] = "pulse"
     df.loc[mlow.isin({"spo2", "sp02", "oxygen"}), "metric"] = "spo2"
 
-    # blood pressure splitting
+    # split blood pressure into systolic / diastolic
     bp_mask = mlow.isin({"blood_pressure", "bp"})
     if "value_2" in df.columns and bp_mask.any():
         bp = df[bp_mask].copy()
@@ -78,19 +73,55 @@ def fetch_measurements(hours: int = 24) -> pd.DataFrame:
     else:
         df["value"] = pd.to_numeric(df.get("value_1"), errors="coerce")
 
-    df = df[["timestamp_utc", "metric", "value"]].dropna(
-        subset=["timestamp_utc", "metric", "value"]
-    )
+    df = df[["timestamp_utc", "metric", "value"]].dropna()
     return df
 
 
 def color_for_value(v: float, lsl: float, usl: float) -> str:
-    """Return red / green / yellow based on limits."""
     if v < lsl:
         return "#F04438"  # red
     if v > usl:
         return "#F4B000"  # yellow
     return "#12B981"     # green
+
+
+def build_colored_segments(
+    sub: pd.DataFrame, lsl: float, usl: float
+) -> Tuple[List[Tuple[List[pd.Timestamp], List[float], str]], List[str]]:
+    """
+    Build line segments where each segment has a single colour.
+    Also returns per-point colours for markers.
+    """
+    xs = sub["ts_local"].tolist()
+    ys = sub["value"].tolist()
+    if len(xs) == 0:
+        return [], []
+
+    pt_colors = [color_for_value(v, lsl, usl) for v in ys]
+
+    segments: List[Tuple[List[pd.Timestamp], List[float], str]] = []
+    cur_color = pt_colors[0]
+    seg_x = [xs[0]]
+    seg_y = [ys[0]]
+
+    for i in range(1, len(xs)):
+        c = pt_colors[i]
+        if c == cur_color:
+            seg_x.append(xs[i])
+            seg_y.append(ys[i])
+        else:
+            # close old segment
+            if len(seg_x) > 1:
+                segments.append((seg_x, seg_y, cur_color))
+            # start new, duplicate previous point so line doesn't gap
+            seg_x = [xs[i - 1], xs[i]]
+            seg_y = [ys[i - 1], ys[i]]
+            cur_color = c
+
+    if len(seg_x) > 1:
+        segments.append((seg_x, seg_y, cur_color))
+
+    return segments, pt_colors
 
 
 def compute_stats(sub: pd.DataFrame) -> Dict[str, float]:
@@ -103,7 +134,7 @@ def compute_stats(sub: pd.DataFrame) -> Dict[str, float]:
         "max": float(s.max()),
     }
 
-# ──────────────────────────── HELPERS: USDA & MEALS ────────────────────────────
+# ───────────────────────── USDA + MEALS ─────────────────────────
 
 def usda_search(query: str, page_size: int = 10) -> List[dict]:
     if not USDA_API_KEY or not query.strip():
@@ -128,8 +159,8 @@ def usda_search(query: str, page_size: int = 10) -> List[dict]:
 
 
 def extract_macros(food: dict) -> dict:
-    """Return dict with kcals, protein, carbs, fat, sodium."""
     nutrients = {n.get("nutrientName", ""): n for n in food.get("foodNutrients", [])}
+
     def val(name, default=0.0):
         n = nutrients.get(name)
         if not n:
@@ -151,7 +182,7 @@ def ensure_state():
     if "usda_results" not in st.session_state:
         st.session_state["usda_results"] = []
 
-# ──────────────────────────── UI HELPERS ────────────────────────────
+# ───────────────────────── UI HELPERS ─────────────────────────
 
 def stats_card_html(stats: Dict[str, float], lsl: float, usl: float, newest: str) -> str:
     return f"""
@@ -177,6 +208,7 @@ def stats_card_html(stats: Dict[str, float], lsl: float, usl: float, newest: str
     </div>
     """
 
+
 def plot_metric_with_stats(
     df: pd.DataFrame,
     metric: str,
@@ -191,31 +223,27 @@ def plot_metric_with_stats(
         return
 
     lsl, usl = LIMITS.get(metric, (0.0, 1e6))
-
-    # to timezone
     sub["ts_local"] = sub["timestamp_utc"].dt.tz_convert(tz)
 
-    # colours for markers
-    marker_colors = [
-        color_for_value(v, lsl, usl) for v in sub["value"].tolist()
-    ]
+    segments, pt_colors = build_colored_segments(sub, lsl, usl)
 
-    col_chart, col_stats = st.columns([3.3, 1.2])
+    col_chart, col_stats = st.columns([3.4, 1.2])
 
     with col_chart:
         fig = go.Figure()
 
-        # light base line
-        fig.add_trace(
-            go.Scatter(
-                x=sub["ts_local"],
-                y=sub["value"],
-                mode="lines",
-                line=dict(width=line_width, color="rgba(148,163,184,0.4)"),
-                hoverinfo="skip",
-                showlegend=False,
+        # coloured line segments
+        for xs, ys, color in segments:
+            fig.add_trace(
+                go.Scatter(
+                    x=xs,
+                    y=ys,
+                    mode="lines",
+                    line=dict(width=line_width, color=color),
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
             )
-        )
 
         # coloured dots
         fig.add_trace(
@@ -225,7 +253,7 @@ def plot_metric_with_stats(
                 mode="markers",
                 marker=dict(
                     size=dot_size,
-                    color=marker_colors,
+                    color=pt_colors,
                     line=dict(width=2, color="#111827"),
                 ),
                 hovertemplate="%{y:.1f}<br>%{x|%Y-%m-%d %H:%M %Z}<extra></extra>",
@@ -267,7 +295,6 @@ def plot_metric_with_stats(
             gridcolor="rgba(148,163,184,0.2)",
             griddash="dot",
         )
-
         st.plotly_chart(fig, use_container_width=True)
 
     with col_stats:
@@ -327,7 +354,7 @@ def render_note_and_meals(tz: str):
 
     col_note, col_meal = st.columns(2)
 
-    # ---------- Add Note ----------
+    # ----- Add Note -----
     with col_note:
         st.subheader("📝 Add Note")
         with st.form("note_form", clear_on_submit=True):
@@ -346,10 +373,9 @@ def render_note_and_meals(tz: str):
                 note_dt = datetime.combine(d, t).astimezone()
             submitted = st.form_submit_button("Add Note")
             if submitted and note_text.strip():
-                # For now just show a toast; you can wire this to backend later.
                 st.success("Note captured (demo only, not persisted yet).")
 
-    # ---------- Add Meal ----------
+    # ----- Add Meal -----
     with col_meal:
         st.subheader("🍽️ Add Meal (USDA)")
         with st.form("meal_form"):
@@ -371,7 +397,6 @@ def render_note_and_meals(tz: str):
             if search_clicked:
                 st.session_state["usda_results"] = usda_search(query)
 
-        # Show search results with "Add" buttons
         results = st.session_state.get("usda_results", [])
         for idx, food in enumerate(results):
             desc = food.get("description", "Unknown item")
@@ -387,7 +412,8 @@ def render_note_and_meals(tz: str):
             with st.container():
                 st.markdown(
                     f"**{label}**  \n"
-                    f"{kcals:.0f} kcal · P {protein:.1f} g · C {carbs:.1f} g · F {fat:.1f} g · Na {sodium:.0f} mg"
+                    f"{kcals:.0f} kcal · P {protein:.1f} g · C {carbs:.1f} g · "
+                    f"F {fat:.1f} g · Na {sodium:.0f} mg"
                 )
                 if st.button("➕ Add", key=f"add_meal_{idx}"):
                     st.session_state["recent_meals"].append(
@@ -403,7 +429,7 @@ def render_note_and_meals(tz: str):
                     )
                     st.success("Meal added to Recent Meals.")
 
-    # ---------- Recent Meals ----------
+    # ----- Recent Meals -----
     st.markdown("### Recent Meals")
     meals = list(reversed(st.session_state["recent_meals"]))
     if not meals:
@@ -439,13 +465,12 @@ def render_note_and_meals(tz: str):
             unsafe_allow_html=True,
         )
 
-
-# ──────────────────────────── MAIN PAGE ────────────────────────────
+# ───────────────────────── MAIN ─────────────────────────
 
 def main():
     ensure_state()
 
-    # Sidebar
+    # sidebar
     with st.sidebar:
         st.markdown("<h3>Settings</h3>", unsafe_allow_html=True)
         tz = st.selectbox(
@@ -453,48 +478,45 @@ def main():
             ["UTC", "US/Eastern", "US/Central", "US/Pacific"],
             index=0,
         )
-
-        # Time window pills (24h, 3d, 7d)
-        window_choice = st.radio(
-            "Time window",
-            options=["24h", "3 days", "7 days"],
-            index=0,
-        )
-        hours_map = {"24h": 24, "3 days": 72, "7 days": 168}
-        hours = hours_map[window_choice]
-
         line_width = st.slider("Line width", 1, 6, 4)
         dot_size = st.slider("Marker size (dots)", 6, 20, 10)
         show_limits = st.checkbox("Show LSL/USL dashed lines", value=True)
         normalize_combined = st.checkbox("Normalize combined overlay", value=True)
 
-    # Top bar
+    # top bar
     st.markdown(
-        """
-        <div class="top-bar"><span class="title">Quantaira Dashboard</span></div>
-        """,
+        "<div class='top-bar'><span class='title'>Quantaira Dashboard</span></div>",
         unsafe_allow_html=True,
     )
+
+    # time window pills in main area
+    col_tw, _ = st.columns([1.3, 2.7])
+    with col_tw:
+        window_choice = st.radio(
+            "Time window",
+            options=["24h", "3 days", "7 days"],
+            index=0,
+            horizontal=True,
+        )
+    hours_map = {"24h": 24, "3 days": 72, "7 days": 168}
+    hours = hours_map[window_choice]
 
     df = fetch_measurements(hours)
     if df.empty:
         st.warning("No data yet from devices for this time window.")
     else:
-        # Metric tabs
-        tabs = st.tabs(["❤️ Heart Rate", "💧 Systolic BP", "💜 Diastolic BP", "🫁 SpO₂", "📊 BP (both)"])
+        tabs = st.tabs(
+            ["❤️ Heart Rate", "💧 Systolic BP", "💜 Diastolic BP", "🫁 SpO₂", "📊 BP (both)"]
+        )
 
         with tabs[0]:
             plot_metric_with_stats(df, "pulse", tz, line_width, dot_size, show_limits)
-
         with tabs[1]:
             plot_metric_with_stats(df, "systolic_bp", tz, line_width, dot_size, show_limits)
-
         with tabs[2]:
             plot_metric_with_stats(df, "diastolic_bp", tz, line_width, dot_size, show_limits)
-
         with tabs[3]:
             plot_metric_with_stats(df, "spo2", tz, line_width, dot_size, show_limits)
-
         with tabs[4]:
             plot_combined(df, tz, normalize_combined)
 
